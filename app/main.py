@@ -1,50 +1,43 @@
-"""
-Netflix catalog API.
-- Loads netflix.csv into Postgres on startup (idempotent).
-- JWT auth (register / login).
-- Filtered search over titles.
-"""
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
-import pandas as pd
 from fastapi import FastAPI, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
 from sqlalchemy import (
-    create_engine, Column, String, Integer, Index, select, or_, and_
+    create_engine, Column, String, Integer, Index, select, or_, and_, func
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 from .config import settings
 from .etl import load_csv_to_db
 
-# --------------------------------------------------------------------------
-# DB setup
-# --------------------------------------------------------------------------
+
 engine = create_engine(settings.DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
 
 class Show(Base):
-    """One row per Netflix title. Column names mirror the CSV exactly."""
     __tablename__ = "shows"
 
-    show_id      = Column(String, primary_key=True)   # external id -> string
-    type         = Column(String, index=True)         # 'Movie' / 'TV Show'
+    show_id      = Column(String, primary_key=True)
+    type         = Column(String, index=True)
     title        = Column(String, index=True)
     director     = Column(String)
-    cast         = Column("cast", String)             # 'cast' is a SQL keyword
+    cast         = Column("cast", String)
     country      = Column(String, index=True)
     date_added   = Column(String)
     release_year = Column(Integer, index=True)
     rating       = Column(String, index=True)
     duration     = Column(String)
-    listed_in    = Column(String, index=True)         # categories/genres
+    listed_in    = Column(String, index=True)
     description  = Column(String)
 
 
@@ -55,7 +48,6 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
 
 
-# Composite index for the most common filter combo
 Index("ix_shows_type_rating", Show.type, Show.rating)
 
 
@@ -67,11 +59,8 @@ def get_db():
         db.close()
 
 
-# --------------------------------------------------------------------------
-# Auth
-# --------------------------------------------------------------------------
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login", auto_error=False)
 
 
 def hash_pw(pw: str) -> str:
@@ -92,7 +81,7 @@ def make_token(sub: str) -> str:
 
 
 def current_user(
-    token: str = Depends(oauth2_scheme),
+    token: Optional[str] = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ) -> User:
     creds_err = HTTPException(
@@ -100,9 +89,10 @@ def current_user(
         detail="Invalid credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    if not token:
+        raise creds_err
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET,
-                             algorithms=[settings.JWT_ALG])
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALG])
         username: Optional[str] = payload.get("sub")
         if not username:
             raise creds_err
@@ -114,9 +104,6 @@ def current_user(
     return user
 
 
-# --------------------------------------------------------------------------
-# Schemas
-# --------------------------------------------------------------------------
 class RegisterIn(BaseModel):
     username: str
     password: str
@@ -145,9 +132,11 @@ class ShowOut(BaseModel):
         from_attributes = True
 
 
-# --------------------------------------------------------------------------
-# Lifespan: create tables + load CSV once
-# --------------------------------------------------------------------------
+class SearchOut(BaseModel):
+    total: int
+    items: list[ShowOut]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(engine)
@@ -157,17 +146,25 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Netflix Catalog API", lifespan=lifespan)
 
+STATIC_DIR = Path(__file__).parent / "static"
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# --------------------------------------------------------------------------
-# Routes
-# --------------------------------------------------------------------------
-@app.get("/")
+
+@app.get("/", include_in_schema=False)
 def root():
+    index = STATIC_DIR / "index.html"
+    if index.exists():
+        return FileResponse(index)
     return {"status": "ok", "docs": "/docs"}
 
 
 @app.post("/auth/register", response_model=TokenOut, status_code=201)
 def register(data: RegisterIn, db: Session = Depends(get_db)):
+    if not data.username or not data.password:
+        raise HTTPException(400, "Username and password required")
+    if len(data.password) < 6:
+        raise HTTPException(400, "Password must be at least 6 characters")
     if db.scalar(select(User).where(User.username == data.username)):
         raise HTTPException(400, "Username already taken")
     user = User(username=data.username, hashed_password=hash_pw(data.password))
@@ -177,21 +174,20 @@ def register(data: RegisterIn, db: Session = Depends(get_db)):
 
 
 @app.post("/auth/login", response_model=TokenOut)
-def login(form: OAuth2PasswordRequestForm = Depends(),
-          db: Session = Depends(get_db)):
+def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.username == form.username))
     if not user or not verify_pw(form.password, user.hashed_password):
         raise HTTPException(401, "Wrong username or password")
     return TokenOut(access_token=make_token(user.username))
 
 
-@app.get("/shows", response_model=list[ShowOut])
+@app.get("/shows", response_model=SearchOut)
 def search_shows(
-    q: Optional[str] = Query(None, description="Search in title / description / cast"),
+    q: Optional[str] = Query(None, description="Search in title / description / cast / director"),
     type: Optional[str] = Query(None, description="'Movie' or 'TV Show'"),
-    rating: Optional[str] = Query(None, description="e.g. 'TV-MA', 'PG-13'"),
+    rating: Optional[str] = None,
     country: Optional[str] = None,
-    genre: Optional[str] = Query(None, description="Substring match on listed_in"),
+    genre: Optional[str] = None,
     release_year: Optional[int] = None,
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
@@ -200,9 +196,7 @@ def search_shows(
     db: Session = Depends(get_db),
     _user: User = Depends(current_user),
 ):
-    stmt = select(Show)
     conds = []
-
     if q:
         like = f"%{q}%"
         conds.append(or_(
@@ -226,11 +220,20 @@ def search_shows(
     if year_to is not None:
         conds.append(Show.release_year <= year_to)
 
-    if conds:
-        stmt = stmt.where(and_(*conds))
+    where = and_(*conds) if conds else None
 
+    total_stmt = select(func.count()).select_from(Show)
+    if where is not None:
+        total_stmt = total_stmt.where(where)
+    total = db.scalar(total_stmt) or 0
+
+    stmt = select(Show)
+    if where is not None:
+        stmt = stmt.where(where)
     stmt = stmt.order_by(Show.title).limit(limit).offset(offset)
-    return db.scalars(stmt).all()
+    items = db.scalars(stmt).all()
+
+    return SearchOut(total=total, items=items)
 
 
 @app.get("/shows/{show_id}", response_model=ShowOut)
@@ -243,21 +246,17 @@ def get_show(show_id: str, db: Session = Depends(get_db),
 
 
 @app.get("/categories")
-def categories(db: Session = Depends(get_db),
-               _user: User = Depends(current_user)):
-    """Distinct genres + ratings — useful to populate filter dropdowns."""
+def categories(db: Session = Depends(get_db), _user: User = Depends(current_user)):
     rows = db.execute(select(Show.listed_in).distinct()).all()
     genres = set()
     for (val,) in rows:
         if val:
             for g in val.split(","):
                 genres.add(g.strip())
-    ratings = [r for (r,) in db.execute(
-        select(Show.rating).distinct()).all() if r]
-    types = [t for (t,) in db.execute(
-        select(Show.type).distinct()).all() if t]
+    ratings = sorted(r for (r,) in db.execute(select(Show.rating).distinct()).all() if r)
+    types = sorted(t for (t,) in db.execute(select(Show.type).distinct()).all() if t)
     return {
         "genres": sorted(genres),
-        "ratings": sorted(ratings),
-        "types": sorted(types),
+        "ratings": ratings,
+        "types": types,
     }

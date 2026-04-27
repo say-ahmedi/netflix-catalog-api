@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Netflix Catalog</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">NETFLIX <span>catalog</span></div>
+    <div id="user-area">
+      <span id="user-label" class="hidden"></span>
+      <button id="logout-btn" class="ghost hidden">Log out</button>
+    </div>
+  </header>
+
+  <!-- Auth screen -->
+  <section id="auth" class="auth-wrap">
+    <div class="auth-card">
+      <div class="tabs">
+        <button class="tab active" data-tab="login">Sign in</button>
+        <button class="tab" data-tab="register">Create account</button>
+      </div>
+
+      <form id="login-form" class="auth-form">
+        <label>Username <input name="username" required autocomplete="username" /></label>
+        <label>Password <input name="password" type="password" required autocomplete="current-password" /></label>
+        <button type="submit">Sign in</button>
+        <p class="error" id="login-err"></p>
+      </form>
+
+      <form id="register-form" class="auth-form hidden">
+        <label>Username <input name="username" required autocomplete="username" /></label>
+        <label>Password <input name="password" type="password" minlength="6" required autocomplete="new-password" /></label>
+        <button type="submit">Create account</button>
+        <p class="hint">At least 6 characters.</p>
+        <p class="error" id="register-err"></p>
+      </form>
+    </div>
+  </section>
+
+  <!-- App -->
+  <main id="app" class="hidden">
+    <aside class="filters">
+      <h2>Filters</h2>
+      <label>Search
+        <input id="f-q" placeholder="title, cast, director..." />
+      </label>
+      <label>Type
+        <select id="f-type"><option value="">Any</option></select>
+      </label>
+      <label>Genre
+        <select id="f-genre"><option value="">Any</option></select>
+      </label>
+      <label>Rating
+        <select id="f-rating"><option value="">Any</option></select>
+      </label>
+      <label>Country
+        <input id="f-country" placeholder="e.g. United States" />
+      </label>
+      <div class="row">
+        <label>From
+          <input id="f-year-from" type="number" min="1900" max="2099" placeholder="1990" />
+        </label>
+        <label>To
+          <input id="f-year-to" type="number" min="1900" max="2099" placeholder="2024" />
+        </label>
+      </div>
+      <div class="actions">
+        <button id="apply-btn">Apply</button>
+        <button id="reset-btn" class="ghost">Reset</button>
+      </div>
+    </aside>
+
+    <section class="results">
+      <div class="results-head">
+        <span id="status">Loading...</span>
+        <div class="pager">
+          <button id="prev-btn" class="ghost">&laquo; Prev</button>
+          <span id="page-label">1</span>
+          <button id="next-btn" class="ghost">Next &raquo;</button>
+        </div>
+      </div>
+      <div id="grid" class="grid"></div>
+    </section>
+  </main>
+
+  <!-- Detail modal -->
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <button class="modal-close" id="modal-close" aria-label="Close">&times;</button>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
